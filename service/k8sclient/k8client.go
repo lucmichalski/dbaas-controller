@@ -20,7 +20,7 @@ package k8sclient
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"fmt"
 
 	"github.com/AlekSi/pointer"
 	"github.com/pkg/errors"
@@ -142,13 +142,6 @@ var psmdbStatesMap = map[appState]ClusterState{
 	appStateReady:   ClusterStateReady,
 	appStateError:   ClusterStateFailed,
 }
-
-var (
-	// ErrXtraDBClusterNotReady The PXC cluster is not in ready state.
-	ErrXtraDBClusterNotReady = errors.New("XtraDB cluster is not ready")
-	// ErrPSMDBClusterNotReady The PSMDB cluster is not ready.
-	ErrPSMDBClusterNotReady = errors.New("PSMDB cluster is not ready")
-)
 
 // K8Client is a client for Kubernetes.
 type K8Client struct {
@@ -283,11 +276,6 @@ func (c *K8Client) UpdateXtraDBCluster(ctx context.Context, params *XtraDBParams
 		return err
 	}
 
-	// This is to prevent concurrent updates
-	if cluster.Status.PXC.Status != pxc.AppStateReady {
-		return ErrXtraDBClusterNotReady //nolint:wrapcheck
-	}
-
 	cluster.Spec.PXC.Size = params.Size
 	cluster.Spec.ProxySQL.Size = params.Size
 
@@ -308,6 +296,25 @@ func (c *K8Client) DeleteXtraDBCluster(ctx context.Context, name string) error {
 	return c.kubeCtl.Delete(ctx, res)
 }
 
+func (c *K8Client) restartDBClusterCmd(name, kind string) []string {
+	return []string{"rollout", "restart", "StatefulSets", fmt.Sprintf("%s-%s", name, kind)}
+}
+
+// RestartXtraDBCluster restarts Percona XtraDB cluster with provided name.
+func (c *K8Client) RestartXtraDBCluster(ctx context.Context, name string) error {
+	_, err := c.kubeCtl.Run(ctx, c.restartDBClusterCmd(name, "pxc"), nil)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.kubeCtl.Run(ctx, c.restartDBClusterCmd(name, "proxysql"), nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // getPerconaXtraDBClusters returns Percona XtraDB clusters.
 func (c *K8Client) getPerconaXtraDBClusters(ctx context.Context) ([]XtraDBCluster, error) {
 	var list meta.List
@@ -319,7 +326,6 @@ func (c *K8Client) getPerconaXtraDBClusters(ctx context.Context) ([]XtraDBCluste
 	res := make([]XtraDBCluster, len(list.Items))
 	for i, item := range list.Items {
 		var cluster pxc.PerconaXtraDBCluster
-
 		if err := json.Unmarshal(item.Raw, &cluster); err != nil {
 			return nil, err
 		}
@@ -544,21 +550,14 @@ func (c *K8Client) UpdatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 	var cluster perconaServerMongoDB
 	err := c.kubeCtl.Get(ctx, string(perconaServerMongoDBKind), params.Name, &cluster)
 	if err != nil {
-		return errors.Wrap(err, "UpdatePSMDBCluster get error")
+		return err
 	}
 
-	// This is to prevent concurrent updates
-	if cluster.Status.Status != appStateReady {
-		return ErrPSMDBClusterNotReady //nolint:wrapcheck
+	for i := range cluster.Spec.Replsets {
+		cluster.Spec.Replsets[i].Size = params.Size
 	}
 
-	cluster.Spec.Replsets[0].Size = params.Size
-
-	if params.Replicaset != nil {
-		cluster.Spec.Replsets[0].Resources = c.setComputeResources(params.Replicaset.ComputeResources)
-	}
-
-	return c.kubeCtl.Apply(ctx, cluster)
+	return c.kubeCtl.Apply(ctx, &cluster)
 }
 
 // DeletePSMDBCluster deletes percona server for mongodb cluster with provided name.
@@ -575,6 +574,13 @@ func (c *K8Client) DeletePSMDBCluster(ctx context.Context, name string) error {
 	return c.kubeCtl.Delete(ctx, res)
 }
 
+// RestartPSMDBCluster restarts Percona server for mongodb cluster with provided name.
+func (c *K8Client) RestartPSMDBCluster(ctx context.Context, name string) error {
+	_, err := c.kubeCtl.Run(ctx, c.restartDBClusterCmd(name, "rs0"), nil)
+
+	return err
+}
+
 // getPSMDBClusters returns Percona Server for MongoDB clusters.
 func (c *K8Client) getPSMDBClusters(ctx context.Context) ([]PSMDBCluster, error) {
 	var list meta.List
@@ -589,13 +595,11 @@ func (c *K8Client) getPSMDBClusters(ctx context.Context) ([]PSMDBCluster, error)
 		if err := json.Unmarshal(item.Raw, &cluster); err != nil {
 			return nil, err
 		}
-
 		val := PSMDBCluster{
 			Name:  cluster.Name,
+			State: psmdbStatesMap[cluster.Status.Status],
 			Size:  cluster.Spec.Replsets[0].Size,
-			State: getReplicasetStatus(cluster),
 		}
-
 		if cluster.Spec.Replsets[0].Resources != nil {
 			val.Replicaset = &Replicaset{
 				ComputeResources: c.getComputeResources(*cluster.Spec.Replsets[0].Resources),
@@ -604,38 +608,6 @@ func (c *K8Client) getPSMDBClusters(ctx context.Context) ([]PSMDBCluster, error)
 		res[i] = val
 	}
 	return res, nil
-}
-
-/*
-  When a cluster is being initialized but there are not enough nodes to form a cluster (less than 3)
-  the operator returns State=Error but that's not the real cluster state.
-  While the cluster is being initialized, we need to return the lowest state value found in the
-  replicaset list of members.
-*/
-func getReplicasetStatus(cluster perconaServerMongoDB) ClusterState {
-	if strings.ToLower(string(cluster.Status.Status)) != string(appStateError) {
-		return psmdbStatesMap[cluster.Status.Status]
-	}
-
-	if len(cluster.Status.Replsets) == 0 {
-		return ClusterStateInvalid
-	}
-
-	var status ClusterState
-	var i int
-
-	// We need to extract the lowest value so the first time, that's the lowest value.
-	// Its is not possible to get the initial value in other way since cluster.Status.Replsets is a map
-	// not an array.
-	for _, replset := range cluster.Status.Replsets {
-		replStatus := psmdbStatesMap[replset.Status]
-		if replStatus < status || i == 0 {
-			status = replStatus
-		}
-		i++
-	}
-
-	return status
 }
 
 // getDeletingXtraDBClusters returns Percona XtraDB clusters which are not fully deleted yet.

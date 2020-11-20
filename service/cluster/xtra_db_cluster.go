@@ -115,6 +115,7 @@ func (s *XtraDBClusterService) CreateXtraDBCluster(ctx context.Context, req *con
 		ProxySQL: &k8sclient.ProxySQL{
 			DiskSize: req.Params.Proxysql.DiskSize,
 		},
+		PMMPublicAddressURL: req.PmmPublicAddressUrl,
 	}
 	params.PXC.ComputeResources = computeResources(req.Params.Pxc.ComputeResources)
 	params.ProxySQL.ComputeResources = computeResources(req.Params.Proxysql.ComputeResources)

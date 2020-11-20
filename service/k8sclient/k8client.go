@@ -27,6 +27,7 @@ import (
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/percona-platform/dbaas-controller/k8_api/common"
 	pxc "github.com/percona-platform/dbaas-controller/k8_api/pxc/v1"
@@ -58,15 +59,19 @@ const (
 )
 
 const (
-	pxcBackupImage       = "percona/percona-xtradb-cluster-operator:1.4.0-pxc8.0-backup"
-	pxcImage             = "percona/percona-xtradb-cluster-operator:1.4.0-pxc8.0"
-	pxcBackupStorageName = "test-backup-storage"
-	pxcAPIVersion        = "pxc.percona.com/v1-4-0"
-	pxcProxySQLImage     = "percona/percona-xtradb-cluster-operator:1.4.0-proxysql"
+	pmmClientImage = "perconalab/pmm-client:dev-latest"
 
-	psmdbBackupImage = "percona/percona-server-mongodb-operator:1.4.0-backup"
-	psmdbImage       = "percona/percona-server-mongodb-operator:1.4.0-mongod4.2"
-	psmdbAPIVersion  = "psmdb.percona.com/v1-4-0"
+	pxcCRVersion         = "1.7.0"
+	pxcBackupImage       = "percona/percona-xtradb-cluster-operator:1.6.0-pxc8.0-backup"
+	pxcImage             = "percona/percona-xtradb-cluster:8.0.20-11.1-debug"
+	pxcBackupStorageName = "pxc-backup-storage-%s"
+	pxcAPIVersion        = "pxc.percona.com/v1-6-0"
+	pxcProxySQLImage     = "percona/percona-xtradb-cluster-operator:1.6.0-proxysql"
+
+	psmdbCRVersion   = "1.6.0"
+	psmdbBackupImage = "percona/percona-server-mongodb-operator:1.5.0-backup"
+	psmdbImage       = "percona/percona-server-mongodb:4.2.8-8"
+	psmdbAPIVersion  = "psmdb.percona.com/v1-6-0"
 )
 
 // ComputeResources represents container computer resources requests or limits.
@@ -95,10 +100,11 @@ type Replicaset struct {
 
 // XtraDBParams contains all parameters required to create or update Percona XtraDB cluster.
 type XtraDBParams struct {
-	Name     string
-	Size     int32
-	PXC      *PXC
-	ProxySQL *ProxySQL
+	Name                string
+	Size                int32
+	PXC                 *PXC
+	ProxySQL            *ProxySQL
+	PMMPublicAddressURL string
 }
 
 // Cluster contains common information related to cluster.
@@ -108,9 +114,10 @@ type Cluster struct {
 
 // PSMDBParams contains all parameters required to create or update percona server for mongodb cluster.
 type PSMDBParams struct {
-	Name       string
-	Size       int32
-	Replicaset *Replicaset
+	Name                string
+	Size                int32
+	Replicaset          *Replicaset
+	PMMPublicAddressURL string
 }
 
 // XtraDBCluster contains information related to xtradb cluster.
@@ -186,6 +193,8 @@ func (c *K8Client) ListXtraDBClusters(ctx context.Context) ([]XtraDBCluster, err
 
 // CreateXtraDBCluster creates Percona XtraDB cluster with provided parameters.
 func (c *K8Client) CreateXtraDBCluster(ctx context.Context, params *XtraDBParams) error {
+	storageName := fmt.Sprintf(pxcBackupStorageName, params.Name)
+	maxUnavailable := intstr.FromInt(1)
 	res := &pxc.PerconaXtraDBCluster{
 		TypeMeta: meta.TypeMeta{
 			APIVersion: pxcAPIVersion,
@@ -195,6 +204,7 @@ func (c *K8Client) CreateXtraDBCluster(ctx context.Context, params *XtraDBParams
 			Name: params.Name,
 		},
 		Spec: pxc.PerconaXtraDBClusterSpec{
+			CRVersion:         pxcCRVersion,
 			AllowUnsafeConfig: true,
 			SecretsName:       "my-cluster-secrets",
 
@@ -205,6 +215,9 @@ func (c *K8Client) CreateXtraDBCluster(ctx context.Context, params *XtraDBParams
 				VolumeSpec: c.volumeSpec(params.PXC.DiskSize),
 				Affinity: &pxc.PodAffinity{
 					TopologyKey: pointer.ToString(pxc.AffinityTopologyKeyOff),
+				},
+				PodDisruptionBudget: &pxc.PodDisruptionBudgetSpec{
+					MaxUnavailable: &maxUnavailable,
 				},
 			},
 
@@ -220,19 +233,22 @@ func (c *K8Client) CreateXtraDBCluster(ctx context.Context, params *XtraDBParams
 			},
 
 			PMM: &pxc.PMMSpec{
-				Enabled: false,
+				Enabled:    true,
+				ServerHost: params.PMMPublicAddressURL,
+				ServerUser: "admin",
+				Image:      pmmClientImage,
 			},
 
 			Backup: &pxc.PXCScheduledBackup{
 				Image: pxcBackupImage,
 				Schedule: []pxc.PXCScheduledBackupSchedule{{
 					Name:        "test",
-					Schedule:    "*/1 * * * *",
+					Schedule:    "*/30 * * * *",
 					Keep:        3,
-					StorageName: pxcBackupStorageName,
+					StorageName: storageName,
 				}},
 				Storages: map[string]*pxc.BackupStorageSpec{
-					pxcBackupStorageName: {
+					storageName: {
 						Type:   pxc.BackupStorageFilesystem,
 						Volume: c.volumeSpec(params.PXC.DiskSize),
 					},
@@ -402,6 +418,7 @@ func (c *K8Client) ListPSMDBClusters(ctx context.Context) ([]PSMDBCluster, error
 
 // CreatePSMDBCluster creates percona server for mongodb cluster with provided parameters.
 func (c *K8Client) CreatePSMDBCluster(ctx context.Context, params *PSMDBParams) error {
+	maxUnavailable := intstr.FromInt(1)
 	res := &perconaServerMongoDB{
 		TypeMeta: TypeMeta{
 			APIVersion: psmdbAPIVersion,
@@ -411,7 +428,8 @@ func (c *K8Client) CreatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 			Name: params.Name,
 		},
 		Spec: perconaServerMongoDBSpec{
-			Image: psmdbImage,
+			CRVersion: psmdbCRVersion,
+			Image:     psmdbImage,
 			Secrets: &secretsSpec{
 				Users: "my-cluster-name-secrets",
 			},
@@ -448,6 +466,19 @@ func (c *K8Client) CreatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 					},
 				},
 			},
+			Sharding: &shardingSpec{
+				Enabled: true,
+				ConfigsvrReplSet: &configsvrReplSetSpec{
+					Size:       params.Size,
+					VolumeSpec: c.volumeSpec(params.Replicaset.DiskSize),
+				},
+				Mongos: &replsetSpec{
+					Size: params.Size,
+				},
+				OperationProfiling: &mongodSpecOperationProfiling{
+					Mode: operationProfilingModeSlowOp,
+				},
+			},
 			Replsets: []*replsetSpec{
 				{
 					Name:      "rs0",
@@ -463,6 +494,9 @@ func (c *K8Client) CreatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 						},
 					},
 					VolumeSpec: c.volumeSpec(params.Replicaset.DiskSize),
+					PodDisruptionBudget: &pxc.PodDisruptionBudgetSpec{
+						MaxUnavailable: &maxUnavailable,
+					},
 					multiAZ: multiAZ{
 						Affinity: &podAffinity{
 							TopologyKey: pointer.ToString(affinityOff),
@@ -472,14 +506,16 @@ func (c *K8Client) CreatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 			},
 
 			PMM: pmmSpec{
-				Enabled: false,
+				Enabled:    true,
+				ServerHost: params.PMMPublicAddressURL,
+				Image:      pmmClientImage,
 			},
 
-			Backup: backupSpec{
-				Enabled:            true,
-				Image:              psmdbBackupImage,
-				ServiceAccountName: "percona-server-mongodb-operator",
-			},
+			//Backup: backupSpec{
+			//	Enabled:            true,
+			//	Image:              psmdbBackupImage,
+			//	ServiceAccountName: "percona-server-mongodb-operator",
+			//},
 		},
 	}
 

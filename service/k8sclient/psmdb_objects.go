@@ -19,6 +19,8 @@ package k8sclient
 
 import (
 	"github.com/percona-platform/dbaas-controller/k8_api/common"
+	pxc "github.com/percona-platform/dbaas-controller/k8_api/pxc/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const affinityOff = "none"
@@ -125,6 +127,18 @@ const (
 	platformOpenshift  platform = "openshift"
 )
 
+type configsvrReplSetSpec struct {
+	Size       int32              `json:"size"`
+	VolumeSpec *common.VolumeSpec `json:"volumeSpec"`
+}
+
+type shardingSpec struct {
+	Enabled            bool                          `json:"enabled"`
+	Mongos             *replsetSpec                  `json:"mongos"`
+	ConfigsvrReplSet   *configsvrReplSetSpec         `json:"configsvrReplSet"`
+	OperationProfiling *mongodSpecOperationProfiling `json:"operationProfiling"`
+}
+
 // perconaServerMongoDBSpec defines the desired state of PerconaServerMongoDB.
 type perconaServerMongoDBSpec struct {
 	Pause                   bool           `json:"pause,omitempty"`
@@ -139,6 +153,8 @@ type perconaServerMongoDBSpec struct {
 	PMM                     pmmSpec        `json:"pmm,omitempty"`
 	SchedulerName           string         `json:"schedulerName,omitempty"`
 	ClusterServiceDNSSuffix string         `json:"clusterServiceDNSSuffix,omitempty"`
+	CRVersion               string         `json:"crVersion,omitempty"`
+	Sharding                *shardingSpec  `json:"sharding"`
 }
 
 type replsetMemberStatus struct {
@@ -204,16 +220,23 @@ type clusterCondition struct {
 type pmmSpec struct {
 	Enabled    bool                 `json:"enabled,omitempty"`
 	ServerHost string               `json:"serverHost,omitempty"`
+	ServerUser string               `json:"serverUser,omitempty"`
 	Image      string               `json:"image,omitempty"`
 	Resources  *common.PodResources `json:"resources,omitempty"`
 }
 
 type multiAZ struct {
-	Affinity          *podAffinity      `json:"affinity,omitempty"`
-	NodeSelector      map[string]string `json:"nodeSelector,omitempty"`
-	PriorityClassName string            `json:"priorityClassName,omitempty"`
-	Annotations       map[string]string `json:"annotations,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
+	Affinity            *podAffinity             `json:"affinity,omitempty"`
+	NodeSelector        map[string]string        `json:"nodeSelector,omitempty"`
+	PriorityClassName   string                   `json:"priorityClassName,omitempty"`
+	Annotations         map[string]string        `json:"annotations,omitempty"`
+	Labels              map[string]string        `json:"labels,omitempty"`
+	PodDisruptionBudget *podDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
+}
+
+type podDisruptionBudgetSpec struct {
+	MinAvailable   *intstr.IntOrString `json:"minAvailable,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 type podAffinity struct {
@@ -221,14 +244,15 @@ type podAffinity struct {
 }
 
 type replsetSpec struct {
-	Resources     *common.PodResources   `json:"resources,omitempty"`
-	Name          string                 `json:"name"`
-	Size          int32                  `json:"size"`
-	ClusterRole   clusterRole            `json:"clusterRole,omitempty"`
-	Arbiter       arbiter                `json:"arbiter,omitempty"`
-	Expose        expose                 `json:"expose,omitempty"`
-	VolumeSpec    *common.VolumeSpec     `json:"volumeSpec,omitempty"`
-	LivenessProbe *livenessProbeExtended `json:"livenessProbe,omitempty"`
+	Resources           *common.PodResources         `json:"resources,omitempty"`
+	Name                string                       `json:"name"`
+	Size                int32                        `json:"size"`
+	ClusterRole         clusterRole                  `json:"clusterRole,omitempty"`
+	Arbiter             arbiter                      `json:"arbiter,omitempty"`
+	Expose              expose                       `json:"expose,omitempty"`
+	VolumeSpec          *common.VolumeSpec           `json:"volumeSpec,omitempty"`
+	LivenessProbe       *livenessProbeExtended       `json:"livenessProbe,omitempty"`
+	PodDisruptionBudget *pxc.PodDisruptionBudgetSpec `json:"podDisruptionBudget"`
 	multiAZ
 }
 

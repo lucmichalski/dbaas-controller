@@ -63,7 +63,7 @@ const (
 
 	pxcCRVersion         = "1.7.0"
 	pxcBackupImage       = "percona/percona-xtradb-cluster-operator:1.6.0-pxc8.0-backup"
-	pxcImage             = "percona/percona-xtradb-cluster:8.0.20-11.1-debug"
+	pxcImage             = "percona/percona-xtradb-cluster:8.0.20-11.1"
 	pxcBackupStorageName = "pxc-backup-storage-%s"
 	pxcAPIVersion        = "pxc.percona.com/v1-6-0"
 	pxcProxySQLImage     = "percona/percona-xtradb-cluster-operator:1.6.0-proxysql"
@@ -100,11 +100,11 @@ type Replicaset struct {
 
 // XtraDBParams contains all parameters required to create or update Percona XtraDB cluster.
 type XtraDBParams struct {
-	Name                string
-	Size                int32
-	PXC                 *PXC
-	ProxySQL            *ProxySQL
-	PMMPublicAddressURL string
+	Name             string
+	Size             int32
+	PXC              *PXC
+	ProxySQL         *ProxySQL
+	PMMPublicAddress string
 }
 
 // Cluster contains common information related to cluster.
@@ -114,10 +114,10 @@ type Cluster struct {
 
 // PSMDBParams contains all parameters required to create or update percona server for mongodb cluster.
 type PSMDBParams struct {
-	Name                string
-	Size                int32
-	Replicaset          *Replicaset
-	PMMPublicAddressURL string
+	Name             string
+	Size             int32
+	Replicaset       *Replicaset
+	PMMPublicAddress string
 }
 
 // XtraDBCluster contains information related to xtradb cluster.
@@ -233,8 +233,8 @@ func (c *K8Client) CreateXtraDBCluster(ctx context.Context, params *XtraDBParams
 			},
 
 			PMM: &pxc.PMMSpec{
-				Enabled:    true,
-				ServerHost: params.PMMPublicAddressURL,
+				Enabled:    params.PMMPublicAddress != "",
+				ServerHost: params.PMMPublicAddress,
 				ServerUser: "admin",
 				Image:      pmmClientImage,
 				Resources: &common.PodResources{
@@ -513,7 +513,7 @@ func (c *K8Client) CreatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 
 			PMM: pmmSpec{
 				Enabled:    true,
-				ServerHost: params.PMMPublicAddressURL,
+				ServerHost: params.PMMPublicAddress,
 				Image:      pmmClientImage,
 			},
 

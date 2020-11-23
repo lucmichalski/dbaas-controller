@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/percona-platform/dbaas-controller/k8_api/common"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -222,5 +224,72 @@ func assertListPSMDBCluster(t *testing.T, ctx context.Context, client *K8Client,
 		if conditionFunc(cluster) {
 			break
 		}
+	}
+}
+
+func TestK8ClientUpdateComputeResources(t *testing.T) {
+	type args struct {
+		in           *ComputeResources
+		podResources *common.PodResources
+	}
+	tests := []struct {
+		name     string
+		args     args
+		expected *common.PodResources
+	}{
+		{
+			"nil",
+			struct {
+				in           *ComputeResources
+				podResources *common.PodResources
+			}{
+				in: &ComputeResources{
+					CPUM:        1000,
+					MemoryBytes: 1000000,
+				},
+				podResources: nil,
+			},
+			&common.PodResources{
+				Requests: nil,
+				Limits: &common.ResourcesList{
+					Memory: "1M",
+					CPU:    "1",
+				},
+			},
+		},
+		{
+			"update",
+			struct {
+				in           *ComputeResources
+				podResources *common.PodResources
+			}{
+				in: &ComputeResources{
+					CPUM:        500,
+					MemoryBytes: 10000000,
+				},
+				podResources: &common.PodResources{
+					Requests: nil,
+					Limits: &common.ResourcesList{
+						Memory: "1M",
+						CPU:    "1",
+					},
+				},
+			},
+			&common.PodResources{
+				Requests: nil,
+				Limits: &common.ResourcesList{
+					Memory: "10M",
+					CPU:    "500m",
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &K8Client{}
+
+			res := c.updateComputeResources(tt.args.in, tt.args.podResources)
+			assert.Equal(t, tt.expected, res)
+		})
 	}
 }

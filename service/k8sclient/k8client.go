@@ -154,6 +154,13 @@ var psmdbStatesMap = map[appState]ClusterState{
 	appStateError:   ClusterStateFailed,
 }
 
+var (
+	// ErrXtraDBClusterNotReady The PXC cluster is not in ready state.
+	ErrXtraDBClusterNotReady = errors.New("XtraDB cluster is not ready")
+	// ErrPSMDBClusterNotReady The PSMDB cluster is not ready.
+	ErrPSMDBClusterNotReady = errors.New("PSMDB cluster is not ready")
+)
+
 // K8Client is a client for Kubernetes.
 type K8Client struct {
 	kubeCtl *kubectl.KubeCtl
@@ -275,8 +282,19 @@ func (c *K8Client) UpdateXtraDBCluster(ctx context.Context, params *XtraDBParams
 		return err
 	}
 
+	// This is to prevent concurrent updates
+	if cluster.Status.Status != pxc.AppStateReady {
+		return ErrXtraDBClusterNotReady //nolint:wrapcheck
+	}
+
 	cluster.Spec.PXC.Size = params.Size
 	cluster.Spec.ProxySQL.Size = params.Size
+	if params.PXC != nil {
+		cluster.Spec.PXC.Resources = c.updateComputeResources(params.PXC.ComputeResources, cluster.Spec.PXC.Resources)
+	}
+	if params.ProxySQL != nil {
+		cluster.Spec.ProxySQL.Resources = c.updateComputeResources(params.ProxySQL.ComputeResources, cluster.Spec.ProxySQL.Resources)
+	}
 
 	return c.kubeCtl.Apply(ctx, &cluster)
 }
@@ -533,14 +551,21 @@ func (c *K8Client) UpdatePSMDBCluster(ctx context.Context, params *PSMDBParams) 
 	var cluster perconaServerMongoDB
 	err := c.kubeCtl.Get(ctx, string(perconaServerMongoDBKind), params.Name, &cluster)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "UpdatePSMDBCluster get error")
 	}
 
-	for i := range cluster.Spec.Replsets {
-		cluster.Spec.Replsets[i].Size = params.Size
+	// This is to prevent concurrent updates
+	if cluster.Status.Status != appStateReady {
+		return ErrPSMDBClusterNotReady //nolint:wrapcheck
 	}
 
-	return c.kubeCtl.Apply(ctx, &cluster)
+	cluster.Spec.Replsets[0].Size = params.Size
+
+	if params.Replicaset != nil {
+		cluster.Spec.Replsets[0].Resources = c.updateComputeResources(params.Replicaset.ComputeResources, cluster.Spec.Replsets[0].Resources)
+	}
+
+	return c.kubeCtl.Apply(ctx, cluster)
 }
 
 // DeletePSMDBCluster deletes percona server for mongodb cluster with provided name.
@@ -646,6 +671,25 @@ func (c *K8Client) setComputeResources(res *ComputeResources) *common.PodResourc
 		r.Limits.Memory = resource.NewQuantity(res.MemoryBytes, resource.DecimalSI).String()
 	}
 	return r
+}
+
+func (c *K8Client) updateComputeResources(res *ComputeResources, podResources *common.PodResources) *common.PodResources {
+	if res == nil || (res.CPUM <= 0 && res.MemoryBytes <= 0) {
+		return podResources
+	}
+	if podResources == nil || podResources.Limits == nil {
+		podResources = &common.PodResources{
+			Limits: new(common.ResourcesList),
+		}
+	}
+
+	if res.CPUM > 0 {
+		podResources.Limits.CPU = resource.NewMilliQuantity(int64(res.CPUM), resource.DecimalSI).String()
+	}
+	if res.MemoryBytes > 0 {
+		podResources.Limits.Memory = resource.NewQuantity(res.MemoryBytes, resource.DecimalSI).String()
+	}
+	return podResources
 }
 
 func (c *K8Client) getDiskSize(volumeSpec *common.VolumeSpec) int64 {
